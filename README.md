@@ -5,7 +5,7 @@
 ```txt
 SPECTRALEYE FORENSIC - DUAL LICENSE AGREEMENT
 
-Copyright (c) 2024 QCAUS Research
+Copyright (c) 2026 QCAUS Research
 
 This software is available under two licensing options:
 
