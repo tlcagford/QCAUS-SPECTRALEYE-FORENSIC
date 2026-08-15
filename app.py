@@ -17,38 +17,41 @@ All-in-one forensic analysis tool with:
 DEPLOYMENT:
     pip install streamlit opencv-python-headless numpy Pillow matplotlib reportlab scipy requests
     streamlit run app.py
+
+    For GPU support:
+        pip install cupy-cuda11x  # or cupy-cuda12x
+"""
 import os
 import sys
 import subprocess
 
-# Force install dependencies from requirements.txt
-def install_requirements():
-    req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
-    if os.path.exists(req_file):
-        print("Installing dependencies from requirements.txt...")
+
+def _ensure_cv2() -> None:
+    """Fallback installer for opencv-python-headless.
+
+    Only touches pip if `import cv2` actually fails, so normal deployments
+    (where requirements.txt was already installed at build time) never make
+    a network call or shell out at runtime. This used to live inside the
+    module docstring as inert text and never ran; it is now real code.
+    """
+    try:
+        import cv2  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    try:
         subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "--upgrade", 
-            "-r", req_file
+            sys.executable, "-m", "pip", "install",
+            "opencv-python-headless==4.8.1.78",
         ])
-        print("Dependencies installed successfully!")
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        print(f"WARNING: automatic opencv-python-headless install failed: {exc}",
+              file=sys.stderr)
 
-# Run this before any other imports
-install_requirements()
 
-# Now try to import cv2
-try:
-    import cv2
-except ImportError:
-    # If still not installed, try direct install
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install",
-        "opencv-python-headless==4.8.1.78"
-    ])
-    import cv2
-For GPU support:
-    pip install cupy-cuda11x  # or cupy-cuda12x
-"""
+_ensure_cv2()
+
 import streamlit as st
 import numpy as np
 import cv2
@@ -56,7 +59,6 @@ import io
 import base64
 import zipfile
 import time
-import os
 import json
 import hashlib
 import uuid
@@ -65,7 +67,7 @@ import queue
 import warnings
 import logging
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import List, Tuple, Optional, Dict, Any, Callable
 from enum import Enum
 from io import BytesIO
@@ -270,6 +272,7 @@ class ForensicReport:
     file_size_bytes: int
     md5_hash: str
     job_id: str = ""
+    analysis_mode: str = ""
     status: AnalysisStatus = AnalysisStatus.PENDING
     fft_results: Optional[FFTResult] = None
     deepfake_results: Optional[DeepfakeResult] = None
@@ -297,6 +300,7 @@ class ForensicReport:
             'file_size_bytes': self.file_size_bytes,
             'md5_hash': self.md5_hash,
             'job_id': self.job_id,
+            'analysis_mode': self.analysis_mode,
             'status': self.status.value if hasattr(self.status, 'value') else str(self.status),
             'deepfake_score': self.deepfake_results.score if self.deepfake_results else 0,
             'deepfake_detected': self.deepfake_results.detected if self.deepfake_results else False,
@@ -1240,6 +1244,7 @@ class ForensicReportGenerator:
         story.append(Paragraph(f"Analyst: {report.analyst}", styles['ForensicBody']))
         story.append(Paragraph(f"Timestamp: {report.timestamp}", styles['ForensicBody']))
         story.append(Paragraph(f"Source: {report.source_file}", styles['ForensicBody']))
+        story.append(Paragraph(f"Analysis Mode: {report.analysis_mode or 'N/A'}", styles['ForensicBody']))
         story.append(Spacer(1, 20))
         
         # Source information
@@ -1402,6 +1407,7 @@ for key, val in {
     "case_id": None,
     "analyst": None,
     "filename": None,
+    "current_image": None,
     "gpu_available": CUDA_AVAILABLE and config.ENABLE_GPU,
 }.items():
     if key not in st.session_state:
@@ -1576,11 +1582,22 @@ def pil_to_bytes(img, fmt="PNG"):
     img.save(buf, format=fmt)
     return buf.getvalue()
 
-def process_image(image: np.ndarray, fft_size: int, case_id: str, analyst: str, 
-                  filename: str, use_ml: bool = True) -> ForensicReport:
+def process_image(image: np.ndarray, fft_size: int, case_id: str, analyst: str,
+                  filename: str, use_ml: bool = True,
+                  file_bytes: Optional[bytes] = None,
+                  analysis_mode: str = "") -> ForensicReport:
     """Process image through complete analysis pipeline"""
     start_time = time.time()
-    
+
+    # Hash and size must reflect the original source bytes (chain-of-custody
+    # integrity), not the decoded/re-encoded pixel buffer.
+    if file_bytes is not None:
+        source_hash = FileHasher.compute_hash(file_bytes)
+        source_size = len(file_bytes)
+    else:
+        source_hash = FileHasher.compute_hash(image.tobytes())
+        source_size = int(image.nbytes)
+
     # Create report
     report = ForensicReport(
         case_id=case_id,
@@ -1589,20 +1606,24 @@ def process_image(image: np.ndarray, fft_size: int, case_id: str, analyst: str,
         source_file=filename,
         source_type='image',
         image_dimensions=(image.shape[1], image.shape[0]),
-        file_size_bytes=0,
-        md5_hash=FileHasher.compute_hash(image.tobytes()),
+        file_size_bytes=source_size,
+        md5_hash=source_hash,
         job_id=f"{case_id}_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}",
+        analysis_mode=analysis_mode,
         status=AnalysisStatus.PROCESSING
     )
     
     try:
         # Check cache
-        cache_key = f"{case_id}_{filename}_{fft_size}_{use_ml}"
+        cache_key = f"{case_id}_{filename}_{fft_size}_{use_ml}_{source_hash}"
         cached = _analysis_cache.get(cache_key)
         if cached:
-            report = cached
-            report.status = AnalysisStatus.CACHED
-            return report
+            # IMPORTANT: never mutate the cached object in place. The cache
+            # stores a reference, so setting .status on it would also
+            # silently change every report returned by earlier cache hits
+            # (they're the same Python object). Return an independent copy
+            # with only the status field overridden.
+            return dataclass_replace(cached, status=AnalysisStatus.CACHED)
         
         # Run analyses
         report.fft_results = ForensicAnalyzer.compute_fft(image, fft_size)
@@ -1771,6 +1792,14 @@ def main():
             "Input Source",
             ["📤 Upload File", "📷 Live Camera", "🔗 URL", "📁 Batch Folder"],
         )
+
+        # Only Upload File and URL are actually implemented. The other two
+        # options used to be selectable with no handling code behind them,
+        # which silently did nothing when the button was clicked.
+        source_ready = source_type.startswith("📤") or source_type.startswith("🔗")
+        if not source_ready:
+            st.caption("⚠ This input source isn't implemented yet. Choose "
+                       "'Upload File' or 'URL' to run an analysis.")
         
         uploaded_file = None
         image_url = None
@@ -1804,72 +1833,193 @@ def main():
         
         st.markdown("---")
         
-        analyze_button = st.button("🔍 RUN ANALYSIS", use_container_width=True, type="primary")
+        analyze_button = st.button(
+            "🔍 RUN ANALYSIS", use_container_width=True, type="primary",
+            disabled=not source_ready,
+        )
     
-    # Main content
-    try:
-        if analyze_button:
-            with st.spinner("Running forensic analysis pipeline..."):
-                image = None
-                file_bytes = None
-                
-                # Get image from source
-                if uploaded_file is not None:
-                    file_bytes = uploaded_file.read()
-                    filename = uploaded_file.name
-                    
-                    FileValidator.validate_file(filename, file_bytes)
-                    
-                    nparr = np.frombuffer(file_bytes, np.uint8)
-                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if image is None:
-                        st.error("Unable to decode image. Please check the file format.")
-                        return
-                    
-                    st.session_state.filename = filename
-                    
-                elif image_url:
-                    try:
-                        file_bytes = SSRFProtection.fetch_url_safe(
-                            image_url,
-                            timeout=config.REQUEST_TIMEOUT_SECONDS,
-                            max_size_mb=config.MAX_FILE_SIZE_MB
-                        )
+    # Main content — a persistent top-level tab holds the About/User Guide
+    # so it's reachable at any time, not just after an analysis has run.
+    main_tab, guide_tab = st.tabs(["🔬 ANALYZE", "📖 ABOUT & USER GUIDE"])
+
+    with main_tab:
+        try:
+            if analyze_button:
+                with st.spinner("Running forensic analysis pipeline..."):
+                    image = None
+                    file_bytes = None
+
+                    # Get image from source
+                    if uploaded_file is not None:
+                        file_bytes = uploaded_file.read()
+                        filename = uploaded_file.name
+
+                        FileValidator.validate_file(filename, file_bytes)
+
                         nparr = np.frombuffer(file_bytes, np.uint8)
                         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
                         if image is None:
-                            st.error("Unable to decode image from URL")
+                            st.error("Unable to decode image. Please check the file format.")
                             return
-                    except SecurityError as e:
-                        st.error(f"Security error: {str(e)}")
+
+                        st.session_state.filename = filename
+
+                    elif image_url:
+                        try:
+                            file_bytes = SSRFProtection.fetch_url_safe(
+                                image_url,
+                                timeout=config.REQUEST_TIMEOUT_SECONDS,
+                                max_size_mb=config.MAX_FILE_SIZE_MB
+                            )
+                            nparr = np.frombuffer(file_bytes, np.uint8)
+                            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            if image is None:
+                                st.error("Unable to decode image from URL")
+                                return
+                        except SecurityError as e:
+                            st.error(f"Security error: {str(e)}")
+                            return
+
+                    if image is None:
+                        st.info("Please upload an image or provide a valid URL")
                         return
-                
-                if image is None:
-                    st.info("Please upload an image or provide a valid URL")
-                    return
-                
-                # Process image
-                report = process_image(
-                    image, fft_size, case_id, analyst, 
-                    st.session_state.filename, use_ml
-                )
-                st.session_state.report = report
-                st.session_state.processed = True
-                
-                # Display results
-                display_results(report, image)
-                
-        elif st.session_state.processed and st.session_state.report:
-            display_results(st.session_state.report, None)
-            
-    except SecurityError as e:
-        st.error(f"🔒 Security error: {str(e)}")
-    except Exception as e:
-        st.error(f"❌ Analysis error: {str(e)}")
-        if config.DEBUG:
-            import traceback
-            st.code(traceback.format_exc())
+
+                    # Process image
+                    report = process_image(
+                        image, fft_size, case_id, analyst,
+                        st.session_state.filename, use_ml,
+                        file_bytes=file_bytes, analysis_mode=analysis_mode,
+                    )
+                    st.session_state.report = report
+                    st.session_state.processed = True
+                    st.session_state.current_image = image
+
+                    # Display results
+                    display_results(report, image)
+
+            elif st.session_state.processed and st.session_state.report:
+                display_results(st.session_state.report, st.session_state.current_image)
+            else:
+                st.info("👈 Configure a case in the sidebar, upload an image (or "
+                        "paste a URL), then click **RUN ANALYSIS**. New to the "
+                        "tool? See the **ABOUT & USER GUIDE** tab above.")
+
+        except SecurityError as e:
+            st.error(f"🔒 Security error: {str(e)}")
+        except Exception as e:
+            st.error(f"❌ Analysis error: {str(e)}")
+            if config.DEBUG:
+                import traceback
+                st.code(traceback.format_exc())
+
+    with guide_tab:
+        render_about_guide()
+
+# ─── About / User Guide ─────────────────────────────────────────────────
+def render_about_guide():
+    """Static About & User Guide content — always available, independent
+    of whether an analysis has been run yet."""
+
+    st.markdown(f"""
+## 🔬 About SpectralEye Forensic
+
+**SpectralEye Forensic** is a frequency-domain (FFT-based) image analysis
+tool for authentication, quality assessment, and anomaly screening. It looks
+at an image's *spectral* signature — how its energy is distributed across
+spatial frequencies — to surface patterns associated with resampling,
+JPEG recompression, GAN upsampling artifacts, blur, and sensor noise.
+
+**Version:** {config.VERSION} &nbsp;•&nbsp; **Author:** Tony E. Ford | QCAUS Research
+
+---
+
+### ⚠️ Important limitations — please read
+
+- **This tool does not produce legal-grade "authentic/fake" verdicts.**
+  Every score below is a heuristic signal, not proof. Treat all findings as
+  investigative leads that need corroboration, not conclusions.
+- **The deepfake and JPEG-ghost detectors are frequency-heuristic, not
+  trained classifiers.** They look for specific known artifact patterns
+  (e.g. checkerboard upsampling frequencies, DCT block frequencies). A clean
+  score does not rule out manipulation, and a flagged score does not confirm it.
+- **The ML anomaly detector fits an Isolation Forest on a single image's
+  feature vector at analysis time.** With one sample there is no real
+  population to compare against, so its "contamination" estimate is a soft
+  heuristic overlay on the rule-based checks, not a statistically robust
+  outlier test. Don't weight it as strongly as the deterministic FFT metrics.
+- **Video files are not currently analyzed.** The uploader accepts common
+  video extensions for forward-compatibility, but only the still-image
+  pipeline is implemented — a video upload will fail to decode.
+- **"Live Camera" and "Batch Folder" input modes are not implemented yet**
+  and are disabled in the sidebar until they are.
+
+---
+
+### 📖 How to use it
+
+1. **Configure the case** — in the sidebar, set an *Analysis Mode* (informational
+   — currently all modes run the same full pipeline), pick an *FFT Resolution*
+   (higher = more detail, slower), and fill in a *Case ID* / *Analyst* name for
+   the report.
+2. **Provide a source image** — either *Upload File* (PNG/JPG/TIFF/BMP/WEBP) or
+   paste an *Image URL*. Uploaded files are validated by extension, size limit,
+   and file-signature (magic bytes) before decoding.
+3. **Click RUN ANALYSIS.** The pipeline computes:
+   - An FFT power spectrum and its dominant frequency peaks
+   - A deepfake/GAN-artifact heuristic score
+   - A JPEG recompression ("ghost") heuristic score
+   - Focus, blur direction/magnitude, noise, and pixel-defect quality metrics
+   - Optionally, an ML anomaly overlay (see limitation above)
+4. **Read the results across the tabs:**
+   - **Overview** — source image, PSD wheel, raw FFT, and top frequency peaks
+   - **Forgery** — deepfake and JPEG-ghost details, plus any ML anomalies
+   - **Quality** — focus/sharpness/blur/noise/dead-pixel metrics
+   - **Report** — the full structured JSON of everything computed
+   - **Export** — download the forensic card (PNG), PDF report, JSON data,
+     or a ZIP bundling all of it plus a CSV of frequency peaks
+5. **Chain of custody:** the MD5 hash and file size recorded in the report
+   are computed from the *original uploaded/fetched bytes*, not the decoded
+   pixel buffer, so they'll match the source file's own hash if you need to
+   verify integrity independently.
+
+---
+
+### 🧾 What the key metrics mean
+
+| Metric | What it measures | Higher generally means |
+|---|---|---|
+| **Deepfake Score** | Checkerboard-upsampling frequency hits, angular clustering of peaks, and high-frequency energy ratio | More GAN-upsampling-like spectral signature |
+| **JPEG Ghost Score** | Match against expected 8×8-DCT-block frequencies | More evidence of a prior JPEG compression pass |
+| **Focus Score** | Share of spectral energy in high frequencies | Sharper / more in-focus image |
+| **Blur Magnitude / Angle** | Directional dip in high-frequency energy | Stronger, more directional motion blur |
+| **Texture Uniformity** | Spatial evenness of spectral power across an 8×8 grid | More uniform texture across the frame |
+| **Anomaly Score** | Isolation Forest + rule-based checks on the above (see limitation) | More features falling outside expected ranges |
+
+---
+
+### 🔒 Data handling
+
+- Analysis runs locally in this session; results are cached in-memory
+  (LRU, {config.CACHE_TTL_SECONDS//60} min TTL) and optionally persisted to a
+  local SQLite database (`{config.DB_PATH}`) if database storage is enabled.
+- The *Image URL* option fetches only `image/*` content types and blocks
+  requests to localhost, private/loopback/multicast IP ranges, and
+  non-http(s) schemes (SSRF protection).
+- Nothing is sent to a third-party service — all computation (FFT, quality
+  metrics, PDF/report generation) happens in this process.
+
+---
+
+### 🧭 Troubleshooting
+
+- **"Unable to decode image"** — the file extension didn't match its actual
+  content, or the file is corrupted / not a supported still-image format.
+- **RUN ANALYSIS is disabled** — you have "Live Camera" or "Batch Folder"
+  selected as the input source; switch to "Upload File" or "URL".
+- **Security error on URL fetch** — the URL pointed at a non-image
+  content-type, a blocked host/IP, or exceeded the size limit.
+""")
 
 # ─── Results Display ──────────────────────────────────────────────────
 def display_results(report: ForensicReport, image: Optional[np.ndarray] = None):
@@ -1924,6 +2074,7 @@ def display_results(report: ForensicReport, image: Optional[np.ndarray] = None):
     st.caption(f"Processing time: {report.processing_time_ms:.0f}ms | "
                f"GPU: {'Yes' if st.session_state.gpu_available else 'No'} | "
                f"ML: {'Yes' if report.anomaly_score > 0 else 'No'} | "
+               f"Mode: {report.analysis_mode or 'N/A'} | "
                f"Job: {report.job_id}")
     
     # Tabs
@@ -1943,6 +2094,8 @@ def display_results(report: ForensicReport, image: Optional[np.ndarray] = None):
             with col3:
                 if report.raw_fft:
                     st.image(report.raw_fft, caption="Raw FFT", use_container_width=True)
+        else:
+            st.info("Source image preview unavailable for this session (report only).")
         
         if report.fft_results and report.fft_results.peaks:
             st.markdown("#### Dominant Frequency Peaks")
