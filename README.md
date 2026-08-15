@@ -66,8 +66,7 @@ Starting at $999/year for individual developers
 Enterprise pricing available upon request
 
 CONTACT FOR COMMERCIAL LICENSE:
-Email: licensing@qcaus.com
-Web: https://qcaus.com/licensing
+Email: tlcagford@gmail.com Tony E. Ford
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 THIRD-PARTY DEPENDENCIES
@@ -101,12 +100,9 @@ By using this Software, you agree to the terms of this Dual License Agreement.
 For research use: You accept the Research License terms.
 For commercial use: You must purchase a Commercial License.
 
-Copyright © 2024 QCAUS Research. All rights reserved.
+Copyright © 2026 QCAUS Research. All rights reserved.
 
 QCAUS Research
-https://qcaus.com
-licensing@qcaus.com
-```
 
 ---
 
@@ -201,8 +197,8 @@ For GPU support:
 - If you're using it for business, consulting, or commercial products → **Commercial License** (paid)
 
 **Contact for Commercial Licensing:**
-- 📧 licensing@qcaus.com
-- 🌐 https://qcaus.com/licensing
+- 📧 tlcagford@protonmail.com / tlcagford@gmail.com Tony E Ford
+
 
 ---
 
@@ -439,7 +435,7 @@ This software includes third-party components with their own licenses:
 
 ## 👤 Author
 
-**Tony E. Ford** - QCAUS Research
+**Tony E. Ford** - QCAUS Systems
 
 ## 🙏 Acknowledgments
 
@@ -449,14 +445,12 @@ This software includes third-party components with their own licenses:
 - All open-source contributors
 
 ## 📬 Contact
-
-- **Commercial Licensing:** licensing@qcaus.com
-- **Support:** support@qcaus.com
-- **Web:** https://qcaus.com
+Tony E Ford
+tlcagford@gmail.com
 
 ---
 
-**Made with ❤️ by QCAUS Research**
+**Made with ❤️ by QCAUS Systems**
 ```
 
 ---
@@ -487,11 +481,6 @@ Add this to your `app.py` (after the imports):
 #    - White-label branding
 #    - Enterprise deployment
 #
-# For commercial licensing: licensing@qcaus.com
-# https://qcaus.com/licensing
-#
-# Third-party components have their own licenses.
-# See LICENSE file for complete license text.
 # ═══════════════════════════════════════════════════════════════════════
 ```
 
@@ -554,7 +543,7 @@ cd spectraleye_forensic
 cat > LICENSE << 'EOF'
 SPECTRALEYE FORENSIC - DUAL LICENSE AGREEMENT
 
-Copyright (c) 2024 QCAUS Research
+Copyright (c) 2026 QCAUS Research
 
 This software is available under two licensing options:
 
