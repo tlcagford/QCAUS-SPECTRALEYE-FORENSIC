@@ -17,7 +17,35 @@ All-in-one forensic analysis tool with:
 DEPLOYMENT:
     pip install streamlit opencv-python-headless numpy Pillow matplotlib reportlab scipy requests
     streamlit run app.py
+import os
+import sys
+import subprocess
 
+# Force install dependencies from requirements.txt
+def install_requirements():
+    req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+    if os.path.exists(req_file):
+        print("Installing dependencies from requirements.txt...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "--upgrade", 
+            "-r", req_file
+        ])
+        print("Dependencies installed successfully!")
+
+# Run this before any other imports
+install_requirements()
+
+# Now try to import cv2
+try:
+    import cv2
+except ImportError:
+    # If still not installed, try direct install
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install",
+        "opencv-python-headless==4.8.1.78"
+    ])
+    import cv2
 For GPU support:
     pip install cupy-cuda11x  # or cupy-cuda12x
 """
