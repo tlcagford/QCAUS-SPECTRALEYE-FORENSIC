@@ -26,17 +26,20 @@ import sys
 import subprocess
 
 
-def _ensure_cv2() -> None:
-    """Fallback installer for opencv-python-headless.
+def _ensure_cv2() -> bool:
+    """Best-effort fallback installer for opencv-python-headless, for local/
+    dev environments where requirements.txt wasn't installed ahead of time.
 
-    Only touches pip if `import cv2` actually fails, so normal deployments
-    (where requirements.txt was already installed at build time) never make
-    a network call or shell out at runtime. This used to live inside the
-    module docstring as inert text and never ran; it is now real code.
+    Returns True if cv2 is importable afterward, False otherwise. Does NOT
+    raise — the caller decides how to fail. On most hosted platforms
+    (including Streamlit Community Cloud) apps cannot install packages at
+    runtime, so this is expected to no-op there; the real fix for hosted
+    deployments is requirements.txt / packages.txt (see below), not this
+    fallback.
     """
     try:
         import cv2  # noqa: F401
-        return
+        return True
     except ImportError:
         pass
 
@@ -44,17 +47,44 @@ def _ensure_cv2() -> None:
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "opencv-python-headless==4.8.1.78",
-        ])
+        ], timeout=60)
+        import cv2  # noqa: F401
+        return True
     except Exception as exc:  # pragma: no cover - best effort fallback
         print(f"WARNING: automatic opencv-python-headless install failed: {exc}",
               file=sys.stderr)
+        return False
 
 
-_ensure_cv2()
+import streamlit as st  # needed early so a missing-dependency failure can
+                         # show a readable message instead of a raw traceback
 
-import streamlit as st
-import numpy as np
+if not _ensure_cv2():
+    st.set_page_config(page_title="SpectralEye Forensic — Setup Required", page_icon="⚠️")
+    st.error(
+        "**Missing dependency: `opencv-python-headless`**\n\n"
+        "This app requires OpenCV but it isn't installed in this "
+        "environment, and the automatic fallback install didn't succeed. "
+        "That's expected on most hosted platforms (including Streamlit "
+        "Community Cloud) — apps there can't install packages at runtime, "
+        "so a hard dependency has to be declared ahead of time instead.\n\n"
+        "**To fix on Streamlit Community Cloud:** add these two files to "
+        "the repo root, then push and redeploy (Cloud installs both "
+        "automatically before starting the app):\n\n"
+        "`requirements.txt`:\n"
+        "```\nstreamlit\nopencv-python-headless\nnumpy\nPillow\nmatplotlib\n"
+        "reportlab\nscipy\nscikit-learn\nrequests\n```\n\n"
+        "`packages.txt` (system libraries some OpenCV wheels still need "
+        "even in headless mode):\n"
+        "```\nlibgl1\nlibglib2.0-0\n```\n\n"
+        "**Running locally instead?** Run "
+        "`pip install opencv-python-headless` in this environment's "
+        "Python, then restart the app."
+    )
+    st.stop()
+
 import cv2
+import numpy as np
 import io
 import base64
 import zipfile
